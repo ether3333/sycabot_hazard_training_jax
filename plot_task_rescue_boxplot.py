@@ -5,24 +5,19 @@ of the current NUM_ROBOTS / NUM_TASKS values in sycabot_env_jax.py.
 
 Examples
 --------
-    python3 plot_task_rescue_boxplot.py \
-        --ppo test_results/r1_t1_ep100_task_rescue_rate.csv \
-        --conventional conventional_r1_t1.csv \
-        --episodes 8 \
-        --robots 1 \
-        --tasks 1
+    python3 plot_task_rescue_boxplot.py
 
-    python3 plot_task_rescue_boxplot.py --ppo ppo.csv --conventional conv.csv \
-        --episodes 30 --robots 1 --tasks 1
+    python3 plot_task_rescue_boxplot.py --episodes 30
 
-    python3 plot_task_rescue_boxplot.py --ppo ppo.csv --conventional conv.csv \
-        --episodes all --robots 1 --tasks 1
+    python3 plot_task_rescue_boxplot.py --episodes all
 """
 
 from __future__ import annotations
 
 import argparse
+import glob
 import os
+import re
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -33,16 +28,19 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description="Plot task rescue rate box plots from raw episode CSV data."
     )
-    parser.add_argument("--ppo", type=str, required=True,
-                        help="CSV with PPO episode-level task rescue data")
+    parser.add_argument("--ppo", type=str, default=None,
+                        help="CSV with PPO episode-level task rescue data "
+                             "(default: newest compatible CSV)")
     parser.add_argument("--conventional", type=str, default=None,
                         help="CSV with conventional-method episode-level task rescue data")
-    parser.add_argument("--episodes", type=str, choices=["8", "30", "all"], required=True,
+    parser.add_argument("--episodes", type=str, choices=["8", "30", "all"], default="8",
                         help="Number of random episodes to use, or all")
-    parser.add_argument("--robots", type=int, required=True,
-                        help="Number of robots for the plot title")
-    parser.add_argument("--tasks", type=int, required=True,
-                        help="Number of tasks for the plot title and percent conversion")
+    parser.add_argument("--robots", type=int, default=None,
+                        help="Number of robots for the plot title "
+                             "(default: infer from CSV or filename)")
+    parser.add_argument("--tasks", type=int, default=None,
+                        help="Number of tasks for the plot title and percent conversion "
+                             "(default: infer from CSV or filename)")
     parser.add_argument("--seed", type=int, default=0,
                         help="Random seed for episode subsampling")
     parser.add_argument("--out-dir", type=str, default="boxplot_results",
@@ -50,7 +48,78 @@ def parse_args():
     return parser.parse_args()
 
 
-def read_episode_csv(path: str, method: str, num_tasks: int) -> pd.DataFrame:
+def is_compatible_csv(path: str) -> bool:
+    try:
+        df = pd.read_csv(path, nrows=2)
+    except Exception:
+        return False
+    cols = set(df.columns)
+    return bool({
+        "tasks_rescued_pct",
+        "task_rescue_rate_percent",
+        "max_delivered",
+        "delivered",
+    } & cols)
+
+
+def find_newest_dataset() -> str:
+    patterns = [
+        "test_results/**/*.csv",
+        "boxplot_results/**/*.csv",
+        "results/**/*.csv",
+        "*.csv",
+    ]
+    candidates = []
+    for pattern in patterns:
+        candidates.extend(glob.glob(pattern, recursive=True))
+
+    candidates = [
+        path for path in candidates
+        if os.path.isfile(path)
+        and not path.startswith("boxplot_results/")
+        and is_compatible_csv(path)
+    ]
+    if not candidates:
+        raise FileNotFoundError(
+            "No compatible CSV found. Run test_and_visualize.py once to create "
+            "a CSV, or pass --ppo path/to/data.csv."
+        )
+    return max(candidates, key=os.path.getmtime)
+
+
+def infer_count_from_path(path: str, prefix: str) -> int | None:
+    patterns = [
+        rf"{prefix}\(?(\d+)\)?",
+        rf"{prefix}_(\d+)",
+    ]
+    name = os.path.basename(path)
+    for pattern in patterns:
+        match = re.search(pattern, name)
+        if match:
+            return int(match.group(1))
+    return None
+
+
+def infer_metadata(path: str, explicit_robots: int | None, explicit_tasks: int | None):
+    robots = explicit_robots
+    tasks = explicit_tasks
+    try:
+        df = pd.read_csv(path, nrows=5)
+        if robots is None and "num_robots" in df.columns:
+            robots = int(df["num_robots"].dropna().iloc[0])
+        if tasks is None and "num_tasks" in df.columns:
+            tasks = int(df["num_tasks"].dropna().iloc[0])
+    except Exception:
+        pass
+
+    if robots is None:
+        robots = infer_count_from_path(path, "r")
+    if tasks is None:
+        tasks = infer_count_from_path(path, "t")
+    return robots, tasks
+
+
+def read_episode_csv(path: str, method: str, num_tasks: int | None) -> pd.DataFrame:
     """Read CSV and return columns: method, episode, tasks_rescued_pct."""
     df = pd.read_csv(path)
     cols = set(df.columns)
@@ -60,8 +129,18 @@ def read_episode_csv(path: str, method: str, num_tasks: int) -> pd.DataFrame:
     elif "task_rescue_rate_percent" in cols:
         pct = df["task_rescue_rate_percent"].astype(float)
     elif "max_delivered" in cols:
+        if num_tasks is None:
+            raise ValueError(
+                f"{path} has max_delivered, so --tasks is needed unless num_tasks "
+                "is present in the CSV or filename."
+            )
         pct = df["max_delivered"].astype(float) / float(num_tasks) * 100.0
     elif "delivered" in cols:
+        if num_tasks is None:
+            raise ValueError(
+                f"{path} has delivered, so --tasks is needed unless num_tasks "
+                "is present in the CSV or filename."
+            )
         if "episode" not in cols:
             raise ValueError(f"{path} has 'delivered' but no 'episode' column.")
         grouped = df.groupby("episode", as_index=False)["delivered"].max()
@@ -136,9 +215,15 @@ def main():
     args = parse_args()
     os.makedirs(args.out_dir, exist_ok=True)
 
-    frames = [read_episode_csv(args.ppo, "PPO", args.tasks)]
+    ppo_path = args.ppo or find_newest_dataset()
+    robots, tasks = infer_metadata(ppo_path, args.robots, args.tasks)
+    print(f"Using PPO data: {ppo_path}")
+
+    frames = [read_episode_csv(ppo_path, "PPO", tasks)]
     if args.conventional is not None:
-        frames.append(read_episode_csv(args.conventional, "Conventional", args.tasks))
+        if tasks is None:
+            _, tasks = infer_metadata(args.conventional, robots, tasks)
+        frames.append(read_episode_csv(args.conventional, "Conventional", tasks))
 
     raw_df = pd.concat(frames, ignore_index=True)
     sampled_df = sample_episodes(raw_df, args.episodes, args.seed)
@@ -147,9 +232,11 @@ def main():
         per_method_counts = sampled_df.groupby("method").size().astype(str).tolist()
         ep_label = "all-" + "-".join(per_method_counts)
 
-    title = f"r({args.robots})_t({args.tasks})_ep({ep_label})_task_rescue_rate"
+    robot_label = robots if robots is not None else "unknown"
+    task_label = tasks if tasks is not None else "unknown"
+    title = f"r({robot_label})_t({task_label})_ep({ep_label})_task_rescue_rate"
     filename_stub = (
-        f"r{args.robots}_t{args.tasks}_ep{ep_label}_task_rescue_rate"
+        f"r{robot_label}_t{task_label}_ep{ep_label}_task_rescue_rate"
         .replace("all-", "all_")
         .replace("/", "_")
     )
