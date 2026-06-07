@@ -17,6 +17,8 @@ Usage examples
     python test_and_visualize.py --deterministic           # use policy mean
 """
 
+from __future__ import annotations
+
 import argparse
 import csv
 import glob
@@ -432,8 +434,43 @@ def save_raw_metrics(all_histories, out_dir: str):
     print(f"Saved delivered time series → {delivered_path}")
 
 
+def plot_tasks_rescued_boxplot(
+    raw_df: pd.DataFrame,
+    group_col: str,
+    title: str,
+    xlabel: str,
+    save_path: str,
+    tasks_rescued_col: str = "tasks_rescued_pct",
+    figsize: tuple[int, int] = (8, 5),
+):
+    """Plot task rescue percentage grouped by the x-axis variable."""
+    import pandas as pd
+
+    unique_groups = sorted(raw_df[group_col].dropna().unique())
+    data = [
+        raw_df.loc[raw_df[group_col] == value, tasks_rescued_col].tolist()
+        for value in unique_groups
+    ]
+    medians = [pd.Series(group_data).median() for group_data in data]
+    xpos = range(1, len(unique_groups) + 1)
+
+    fig, ax = plt.subplots(figsize=figsize)
+    ax.boxplot(data, labels=unique_groups)
+    ax.plot(xpos, medians, marker="o", color="red", alpha=0.7)
+    ax.set_title(title)
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel("Tasks rescued (%)")
+    ax.set_ylim(-5, 105)
+    ax.grid(True, linestyle="--", alpha=0.4)
+    fig.tight_layout()
+    fig.savefig(save_path, dpi=300, bbox_inches="tight")
+    return fig, ax
+
+
 def plot_task_rescue_boxplot(all_histories, sample: str, out_dir: str, seed: int):
-    """Box plot of per-episode task rescue rates from max delivered tasks."""
+    """Build the raw DataFrame and save a task rescue box plot."""
+    import pandas as pd
+
     total_eps = len(all_histories)
     if sample == "all":
         selected_idx = np.arange(total_eps)
@@ -447,63 +484,37 @@ def plot_task_rescue_boxplot(all_histories, sample: str, out_dir: str, seed: int
         rng = np.random.default_rng(seed)
         selected_idx = np.sort(rng.choice(total_eps, size=sample_size, replace=False))
 
-    rates = []
     rows = []
     for idx in selected_idx:
         history = all_histories[int(idx)]
         max_delivered = max(history["delivered"]) if history["delivered"] else 0.0
         rescue_rate = max_delivered / float(NUM_TASKS) * 100.0
-        rates.append(rescue_rate)
         rows.append({
             "num_robots": NUM_ROBOTS,
             "num_tasks": NUM_TASKS,
             "episode": int(idx) + 1,
+            "episode_group": f"{len(selected_idx)} episodes",
             "max_delivered": max_delivered,
-            "task_rescue_rate_percent": rescue_rate,
+            "tasks_rescued_pct": rescue_rate,
         })
 
-    used_eps = len(rates)
+    raw_df = pd.DataFrame(rows)
+    used_eps = len(raw_df)
     title = f"r({NUM_ROBOTS})_t({NUM_TASKS})_ep({used_eps})_task_rescue_rate"
     filename_stub = f"r{NUM_ROBOTS}_t{NUM_TASKS}_ep{used_eps}_task_rescue_rate"
-    filename = f"{filename_stub}.png"
-    save_path = os.path.join(out_dir, filename)
+    save_path = os.path.join(out_dir, f"{filename_stub}.png")
 
-    fig, ax = plt.subplots(figsize=(6, 6))
-    ax.boxplot(
-        rates,
-        labels=[f"{used_eps} episodes"],
-        patch_artist=True,
-        boxprops={"facecolor": "mediumpurple", "alpha": 0.55},
-        medianprops={"color": "black", "linewidth": 2},
-        whiskerprops={"color": "dimgray"},
-        capprops={"color": "dimgray"},
-        flierprops={"marker": "o", "markerfacecolor": "white", "markeredgecolor": "purple"},
+    fig, _ = plot_tasks_rescued_boxplot(
+        raw_df=raw_df,
+        group_col="episode_group",
+        title=title,
+        xlabel="Episodes sampled",
+        save_path=save_path,
     )
-    x_jitter = np.random.default_rng(seed + 1).normal(1.0, 0.025, size=used_eps)
-    ax.scatter(x_jitter, rates, color="purple", alpha=0.75, s=28, zorder=3)
-    ax.set_title(title)
-    ax.set_ylabel("Task rescue rate (%)")
-    ax.set_ylim(-5, 105)
-    ax.grid(True, axis="y", alpha=0.35)
-    ax.axhline(np.mean(rates), color="black", linestyle="--",
-               linewidth=1, label=f"mean={np.mean(rates):.1f}%")
-    ax.legend(fontsize=8)
-
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
 
     csv_path = os.path.join(out_dir, f"{filename_stub}.csv")
-    with open(csv_path, "w", newline="") as f:
-        writer = csv.DictWriter(
-            f,
-            fieldnames=[
-                "num_robots", "num_tasks", "episode",
-                "max_delivered", "task_rescue_rate_percent",
-            ],
-        )
-        writer.writeheader()
-        writer.writerows(rows)
+    raw_df.to_csv(csv_path, index=False)
 
     print(f"Saved task rescue rate box plot -> {save_path}")
     print(f"Saved selected box-plot data -> {csv_path}")
