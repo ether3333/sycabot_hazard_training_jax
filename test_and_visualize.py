@@ -67,6 +67,10 @@ def parse_args():
     parser.add_argument("--seed",         type=int,  default=0)
     parser.add_argument("--out-dir",      type=str,  default="test_results",
                         help="Directory for saved plots")
+    parser.add_argument("--boxplot-episodes", type=str, choices=["8", "30", "all"], default=None,
+                        help="Save a task rescue rate box plot using 8, 30, or all episodes")
+    parser.add_argument("--boxplot-seed", type=int, default=None,
+                        help="Random seed for selecting box-plot episodes (default: --seed)")
     return parser.parse_args()
 
 
@@ -428,6 +432,83 @@ def save_raw_metrics(all_histories, out_dir: str):
     print(f"Saved delivered time series → {delivered_path}")
 
 
+def plot_task_rescue_boxplot(all_histories, sample: str, out_dir: str, seed: int):
+    """Box plot of per-episode task rescue rates from max delivered tasks."""
+    total_eps = len(all_histories)
+    if sample == "all":
+        selected_idx = np.arange(total_eps)
+    else:
+        sample_size = int(sample)
+        if total_eps < sample_size:
+            raise ValueError(
+                f"--boxplot-episodes {sample_size} needs at least {sample_size} "
+                f"rollout episodes, but --episodes is {total_eps}."
+            )
+        rng = np.random.default_rng(seed)
+        selected_idx = np.sort(rng.choice(total_eps, size=sample_size, replace=False))
+
+    rates = []
+    rows = []
+    for idx in selected_idx:
+        history = all_histories[int(idx)]
+        max_delivered = max(history["delivered"]) if history["delivered"] else 0.0
+        rescue_rate = max_delivered / float(NUM_TASKS) * 100.0
+        rates.append(rescue_rate)
+        rows.append({
+            "num_robots": NUM_ROBOTS,
+            "num_tasks": NUM_TASKS,
+            "episode": int(idx) + 1,
+            "max_delivered": max_delivered,
+            "task_rescue_rate_percent": rescue_rate,
+        })
+
+    used_eps = len(rates)
+    title = f"r({NUM_ROBOTS})_t({NUM_TASKS})_ep({used_eps})_task_rescue_rate"
+    filename_stub = f"r{NUM_ROBOTS}_t{NUM_TASKS}_ep{used_eps}_task_rescue_rate"
+    filename = f"{filename_stub}.png"
+    save_path = os.path.join(out_dir, filename)
+
+    fig, ax = plt.subplots(figsize=(6, 6))
+    ax.boxplot(
+        rates,
+        labels=[f"{used_eps} episodes"],
+        patch_artist=True,
+        boxprops={"facecolor": "mediumpurple", "alpha": 0.55},
+        medianprops={"color": "black", "linewidth": 2},
+        whiskerprops={"color": "dimgray"},
+        capprops={"color": "dimgray"},
+        flierprops={"marker": "o", "markerfacecolor": "white", "markeredgecolor": "purple"},
+    )
+    x_jitter = np.random.default_rng(seed + 1).normal(1.0, 0.025, size=used_eps)
+    ax.scatter(x_jitter, rates, color="purple", alpha=0.75, s=28, zorder=3)
+    ax.set_title(title)
+    ax.set_ylabel("Task rescue rate (%)")
+    ax.set_ylim(-5, 105)
+    ax.grid(True, axis="y", alpha=0.35)
+    ax.axhline(np.mean(rates), color="black", linestyle="--",
+               linewidth=1, label=f"mean={np.mean(rates):.1f}%")
+    ax.legend(fontsize=8)
+
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+    csv_path = os.path.join(out_dir, f"{filename_stub}.csv")
+    with open(csv_path, "w", newline="") as f:
+        writer = csv.DictWriter(
+            f,
+            fieldnames=[
+                "num_robots", "num_tasks", "episode",
+                "max_delivered", "task_rescue_rate_percent",
+            ],
+        )
+        writer.writeheader()
+        writer.writerows(rows)
+
+    print(f"Saved task rescue rate box plot -> {save_path}")
+    print(f"Saved selected box-plot data -> {csv_path}")
+
+
 # ========================================================================== #
 #  Video export                                                               #
 # ========================================================================== #
@@ -551,8 +632,11 @@ def save_video(all_histories, env, env_params, out_dir: str, fps: int = 15):
 def main():
     args = parse_args()
 
-    do_render = args.render or args.both or not (args.render or args.plot)
-    do_plot   = args.plot   or args.both or not (args.render or args.plot)
+    output_requested = (
+        args.render or args.plot or args.both or args.video or args.boxplot_episodes is not None
+    )
+    do_render = args.render or args.both or not output_requested
+    do_plot   = args.plot   or args.both or not output_requested
 
     # Locate params
     params_path = args.params or find_newest_params()
@@ -624,6 +708,15 @@ def main():
         plot_summary(all_histories, args.out_dir)
 
     save_raw_metrics(all_histories, args.out_dir)
+
+    if args.boxplot_episodes is not None:
+        boxplot_seed = args.seed if args.boxplot_seed is None else args.boxplot_seed
+        plot_task_rescue_boxplot(
+            all_histories=all_histories,
+            sample=args.boxplot_episodes,
+            out_dir=args.out_dir,
+            seed=boxplot_seed,
+        )
 
     if args.video:
         save_video(all_histories, env, env_params, args.out_dir, fps=args.fps)
