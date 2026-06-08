@@ -32,8 +32,12 @@ def parse_args():
     )
     parser.add_argument("--data", type=str, default=None,
                         help="CSV path. Default: newest delivered/episode metrics CSV.")
-    parser.add_argument("--episodes", type=str, choices=["8", "30", "all"], default="8",
-                        help="Number of random episodes to include.")
+    
+    # ⬇️ THE FIX IS HERE ⬇️
+    # We removed choices=["8", "30", "all"] so it accepts any string/number
+    parser.add_argument("--episodes", type=str, default="8",
+                        help="Number of random episodes to include (e.g., '5', '8', 'all').")
+    
     parser.add_argument("--seed", type=int, default=0,
                         help="Random seed for episode sampling.")
     parser.add_argument("--out-dir", type=str, default="boxplot_results",

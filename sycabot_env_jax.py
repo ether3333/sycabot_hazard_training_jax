@@ -8,7 +8,7 @@ from flax import struct
 
 from environment_configs import get_lab_environment_config
 
-NUM_ROBOTS = 2
+NUM_ROBOTS = 2 #
 NUM_TASKS = 2
 NUM_EXITS = 5
 NUM_HAZARDS = 2
